@@ -248,3 +248,45 @@ export {
   isContractEvent,
 } from './eventOrigin';
 export type { EventOrigin, LedgerEvent } from './eventOrigin';
+
+// Contract storage schema version reporting (Issue #499).
+// Query get_storage_version() on deployed contracts to verify that storage
+// has been migrated after an upgrade. See docs/UPGRADING.md for context.
+export {
+  EXPECTED_STORAGE_VERSION,
+  getStorageVersion,
+  classifyVersion,
+  ContractVersionChecker,
+  ContractVersionError,
+  formatVersionReport,
+} from './contractVersion';
+export type {
+  ContractRole,
+  VersionStatus,
+  ContractVersionReport,
+  DeploymentVersionReport,
+  DeploymentContracts,
+  ContractVersionCheckerOptions,
+  SimulationServer,
+} from './contractVersion';
+
+// Post-deployment smoke checks (Issue #511).
+// Run critical no-auth read-only probes on each deployed contract immediately
+// after deploy or upgrade to confirm the new code is live and responding.
+// See docs/UPGRADING.md for the full operational workflow.
+export {
+  smokeProbe,
+  PostDeploymentSmokeChecker,
+  SmokeCheckError,
+  formatSmokeReport,
+} from './smokeCheck';
+export type {
+  SmokeContractRole,
+  SmokeContracts,
+  SmokeSimulationServer,
+  SmokeCheckerOptions,
+  ProbeStatus,
+  EntrypointProbeResult,
+  ContractSmokeResult,
+  DeploymentSmokeReport,
+} from './smokeCheck';

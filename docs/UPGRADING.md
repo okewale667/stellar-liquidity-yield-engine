@@ -160,6 +160,104 @@ An example of a change that needs both a bump and migration work: adding
 changes the encoding of the stored stream list, so a build containing it must
 migrate the stored `streams` vector rather than decode it as-is.
 
+## Post-deployment smoke checks (Issue #511)
+
+After every deploy or upgrade, run a smoke check to confirm the new code is live
+and all critical read-only entrypoints respond. The SDK provides
+`PostDeploymentSmokeChecker` in `sdk/src/smokeCheck.ts` for this.
+
+```ts
+import { PostDeploymentSmokeChecker, formatSmokeReport } from '@stellar-liquidity/sdk';
+import { SorobanRpc, Networks } from 'stellar-sdk';
+
+const server = new SorobanRpc.Server('https://soroban-testnet.stellar.org');
+
+const checker = new PostDeploymentSmokeChecker(server, {
+  yieldEngine:       process.env.YIELD_ENGINE_CONTRACT_ID!,
+  yieldVault:        process.env.YIELD_VAULT_CONTRACT_ID!,
+  rebalanceEngine:   process.env.REBALANCE_ENGINE_CONTRACT_ID!,
+  rewardDistributor: process.env.REWARD_DISTRIBUTOR_CONTRACT_ID!,
+  strategyRegistry:  process.env.STRATEGY_REGISTRY_CONTRACT_ID!,
+  ilInsurance:       process.env.IL_INSURANCE_CONTRACT_ID!,
+  actuary:           process.env.ACTUARY_CONTRACT_ID!,
+}, { networkPassphrase: Networks.TESTNET });
+
+const report = await checker.checkAll();
+console.log(formatSmokeReport(report));
+if (!report.allPassed) {
+  process.exit(1);
+}
+```
+
+### What is checked per contract
+
+Each contract is probed on the following no-auth read-only entrypoints. The
+calls use a simulation (no signing, no funded account), consistent with every
+other read-only SDK call.
+
+| Contract         | Entrypoints                                                              |
+|------------------|--------------------------------------------------------------------------|
+| yieldEngine      | `get_storage_version`, `get_admin`, `is_paused`, `is_circuit_breaker_tripped` |
+| yieldVault       | `get_storage_version`, `get_vault_info`, `get_metrics`, `get_treasury`   |
+| rebalanceEngine  | `get_storage_version`, `is_paused`, `get_strategy_count`, `get_max_slippage_bps` |
+| rewardDistributor| `get_storage_version`, `get_state`                                       |
+| strategyRegistry | `get_storage_version`, `is_paused_view`, `get_strategy_count`            |
+| ilInsurance      | `get_storage_version`, `reserve_pool`, `get_collateralization_ratio`     |
+| actuary          | `get_storage_version`, `get_simulation_params`, `get_pricing_params`     |
+
+`get_storage_version` is the universal liveness probe: it returns `0` on a
+contract deployed before the versioning module existed, and ≥ 1 on a correctly
+initialized contract. The other entrypoints confirm the contract's initialization
+state and that the new wasm responds on its critical read paths.
+
+### When to run smoke checks
+
+| Event | Action |
+|---|---|
+| Fresh deployment | Run smoke checks immediately after `initialize`. All probes should pass. |
+| In-place upgrade (Flow A) | Run smoke checks after `upgrade` **and** after `migrate`. Confirm version advances. |
+| Re-deploy (Flow B) | Run smoke checks on the new address before switching traffic. |
+| Rollback | Run smoke checks after the rollback `upgrade` call to confirm the old code is live. |
+
+### Integrating with Flow A
+
+Add a smoke check as step 5 after `migrate`:
+
+```bash
+# 5. Confirm smoke checks pass on the upgraded contract.
+node -e "
+  const { PostDeploymentSmokeChecker, formatSmokeReport } = require('./sdk');
+  const { SorobanRpc, Networks } = require('stellar-sdk');
+  async function run() {
+    const server = new SorobanRpc.Server(process.env.SOROBAN_RPC_URL);
+    const checker = new PostDeploymentSmokeChecker(server,
+      { yieldVault: process.env.CONTRACT_ID },
+      { networkPassphrase: Networks.TESTNET }
+    );
+    const report = await checker.checkAll();
+    console.log(formatSmokeReport(report));
+    if (!report.allPassed) process.exit(1);
+  }
+  run();
+"
+```
+
+A non-zero exit stops the pipeline and signals that the upgrade needs
+investigation before traffic is restored.
+
+### Failure behaviour
+
+- Per-contract and per-probe failures are captured in the report rather than
+  thrown, so a single unreachable contract does not prevent the rest from being
+  checked.
+- `report.allPassed` is `false` when any probe on any configured contract fails.
+- `report.failingRoles` lists the contract roles with at least one failure.
+- `formatSmokeReport(report)` produces a log-ready multiline string with per-probe
+  failure details and a summary line.
+- The low-level `smokeProbe(server, passphrase, contractId, entrypoint, validate?)`
+  function is exported for callers that want to probe individual entrypoints
+  outside the full suite.
+
 ## Testing an upgrade
 
 - `tests/upgrade_tests.rs` covers all seven contracts: version recorded at
@@ -174,3 +272,8 @@ migrate the stored `streams` vector rather than decode it as-is.
 - Run `cargo test --test upgrade_tests`.
 - The test builds the "replacement" wasm bytes in-process
   (`empty_contract_wasm`), so it needs no build artefact and runs in CI.
+- `sdk/src/smokeCheck.test.ts` covers the TypeScript smoke check layer: normal
+  pass, RPC error, failed simulation, validator rejection, all seven contract
+  roles having at least one probe, `get_storage_version` always being the first
+  probe, boundary values (version 0, paused=false, tripped=true), and
+  `formatSmokeReport` output content. Run `npx jest smokeCheck`.
